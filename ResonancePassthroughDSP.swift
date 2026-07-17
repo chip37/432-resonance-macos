@@ -27,6 +27,10 @@ final class ResonancePassthroughDSP {
         outputData: UnsafeMutablePointer<AudioBufferList>,
         pullInputBlock: AURenderPullInputBlock?
     ) -> AUAudioUnitStatus {
+        guard outputBusNumber == 0 else {
+            return kAudioUnitErr_InvalidElement
+        }
+
         if DEBUG_TEST_TONE {
             return renderTestTone(frameCount: frameCount, outputData: outputData)
         }

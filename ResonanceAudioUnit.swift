@@ -24,6 +24,10 @@ final class ResonanceAudioUnit: AUAudioUnit {
         outputBusArray
     }
 
+    override var canProcessInPlace: Bool {
+        true
+    }
+
     override init(componentDescription: AudioComponentDescription, options: AudioComponentInstantiationOptions = []) throws {
         let defaultFormat = try Self.makeInitialBusFormat()
 
@@ -31,6 +35,8 @@ final class ResonanceAudioUnit: AUAudioUnit {
         outputBus = try AUAudioUnitBus(format: defaultFormat)
         inputBus.maximumChannelCount = 64
         outputBus.maximumChannelCount = 64
+        inputBus.shouldAllocateBuffer = false
+        outputBus.shouldAllocateBuffer = false
 
         try super.init(componentDescription: componentDescription, options: options)
 
@@ -62,7 +68,9 @@ final class ResonanceAudioUnit: AUAudioUnit {
         print("432 Resonance AU allocateRenderResources interleaved: input=\(inputFormat.isInterleaved), output=\(outputFormat.isInterleaved)")
         print("432 Resonance AU passthrough negotiated input channel count: \(inputFormat.channelCount)")
         print("432 Resonance AU passthrough negotiated output channel count: \(outputFormat.channelCount)")
-        print("432 Resonance AU passthrough operating in-place: true")
+        print("432 Resonance AU passthrough canProcessInPlace: \(canProcessInPlace)")
+        print("432 Resonance AU passthrough input shouldAllocateBuffer: \(inputBus.shouldAllocateBuffer)")
+        print("432 Resonance AU passthrough output shouldAllocateBuffer: \(outputBus.shouldAllocateBuffer)")
         print("432 Resonance AU passthrough input/output bus formats match: \(Self.formatsMatch(inputFormat, outputFormat))")
 
         guard inputFormat.commonFormat == .pcmFormatFloat32,
@@ -81,6 +89,10 @@ final class ResonanceAudioUnit: AUAudioUnit {
 
         guard inputFormat.sampleRate == outputFormat.sampleRate else {
             throw Self.formatError("ResonanceAudioUnit input and output sample rates must match.")
+        }
+
+        guard inputFormat.channelCount == outputFormat.channelCount else {
+            throw Self.formatError("ResonanceAudioUnit input and output channel counts must match.")
         }
 
         try super.allocateRenderResources()
