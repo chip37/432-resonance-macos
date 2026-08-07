@@ -1,26 +1,77 @@
 import AudioToolbox
-import AVFoundation
 import Darwin
 
-private let DEBUG_TEST_TONE = false
-
 final class ResonancePassthroughDSP {
-    private let toneFrequency = 440.0
-    private let toneAmplitude: Float = 0.05
-    private var phase = 0.0
-    private var phaseIncrement = 0.0
+    private var inputBufferList: UnsafeMutablePointer<AudioBufferList>?
+    private var inputChannelData: [UnsafeMutableRawPointer] = []
+    private var inputChannelCounts: [UInt32] = []
+    private var channelCount = 0
+    private var maximumFrameCount = 0
 
-    func configure(sampleRate: Double) {
-        phase = 0.0
-        phaseIncrement = 2.0 * Double.pi * toneFrequency / sampleRate
+    deinit {
+        deallocateRenderResources()
     }
 
-    func reset() {
-        phase = 0.0
+    func allocateRenderResources(channelCount: Int, maximumFrameCount: Int) {
+        deallocateRenderResources()
+
+        self.channelCount = channelCount
+        self.maximumFrameCount = maximumFrameCount
+
+        let bufferListSize = MemoryLayout<AudioBufferList>.size
+            + max(0, channelCount - 1) * MemoryLayout<AudioBuffer>.stride
+        let rawBufferList = UnsafeMutableRawPointer.allocate(
+            byteCount: bufferListSize,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        rawBufferList.initializeMemory(
+            as: UInt8.self,
+            repeating: 0,
+            count: bufferListSize
+        )
+
+        let bufferList = rawBufferList.assumingMemoryBound(to: AudioBufferList.self)
+        bufferList.pointee.mNumberBuffers = UInt32(channelCount)
+
+        let bytesPerChannel = maximumFrameCount * MemoryLayout<Float>.stride
+        inputChannelData.reserveCapacity(channelCount)
+        inputChannelCounts.reserveCapacity(channelCount)
+
+        let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
+        for channelIndex in 0..<channelCount {
+            let channelData = UnsafeMutableRawPointer.allocate(
+                byteCount: bytesPerChannel,
+                alignment: MemoryLayout<Float>.alignment
+            )
+            inputChannelData.append(channelData)
+            inputChannelCounts.append(1)
+            buffers[channelIndex] = AudioBuffer(
+                mNumberChannels: 1,
+                mDataByteSize: UInt32(bytesPerChannel),
+                mData: channelData
+            )
+        }
+
+        inputBufferList = bufferList
+    }
+
+    func deallocateRenderResources() {
+        for channelData in inputChannelData {
+            channelData.deallocate()
+        }
+        inputChannelData.removeAll(keepingCapacity: false)
+        inputChannelCounts.removeAll(keepingCapacity: false)
+
+        if let inputBufferList {
+            UnsafeMutableRawPointer(inputBufferList).deallocate()
+            self.inputBufferList = nil
+        }
+
+        channelCount = 0
+        maximumFrameCount = 0
     }
 
     func render(
-        actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
         timestamp: UnsafePointer<AudioTimeStamp>,
         frameCount: AUAudioFrameCount,
         outputBusNumber: Int,
@@ -31,49 +82,54 @@ final class ResonancePassthroughDSP {
             return kAudioUnitErr_InvalidElement
         }
 
-        if DEBUG_TEST_TONE {
-            return renderTestTone(frameCount: frameCount, outputData: outputData)
-        }
-
         guard let pullInputBlock else {
             return kAudioUnitErr_NoConnection
         }
 
-        return pullInputBlock(
-            actionFlags,
+        guard let inputBufferList,
+              Int(frameCount) <= maximumFrameCount else {
+            return kAudioUnitErr_TooManyFramesToProcess
+        }
+
+        let byteCount = Int(frameCount) * MemoryLayout<Float>.stride
+        inputBufferList.pointee.mNumberBuffers = UInt32(channelCount)
+
+        let inputBuffers = UnsafeMutableAudioBufferListPointer(inputBufferList)
+        for channelIndex in 0..<channelCount {
+            inputBuffers[channelIndex].mNumberChannels = inputChannelCounts[channelIndex]
+            inputBuffers[channelIndex].mData = inputChannelData[channelIndex]
+            inputBuffers[channelIndex].mDataByteSize = UInt32(byteCount)
+        }
+
+        var pullFlags: AudioUnitRenderActionFlags = []
+        let pullStatus = pullInputBlock(
+            &pullFlags,
             timestamp,
             frameCount,
             0,
-            outputData
+            inputBufferList
         )
-    }
 
-    private func renderTestTone(
-        frameCount: AUAudioFrameCount,
-        outputData: UnsafeMutablePointer<AudioBufferList>
-    ) -> AUAudioUnitStatus {
+        guard pullStatus == noErr else {
+            return pullStatus
+        }
+
         let outputBuffers = UnsafeMutableAudioBufferListPointer(outputData)
-        let frameCount = Int(frameCount)
+        guard inputBuffers.count >= channelCount,
+              outputBuffers.count >= channelCount else {
+            return kAudio_ParamError
+        }
 
-        for bufferIndex in 0..<outputBuffers.count {
-            guard let rawData = outputBuffers[bufferIndex].mData else {
+        for channelIndex in 0..<channelCount {
+            guard let inputData = inputBuffers[channelIndex].mData,
+                  let outputData = outputBuffers[channelIndex].mData else {
                 return kAudio_ParamError
             }
 
-            let samples = rawData.assumingMemoryBound(to: Float.self)
-            var localPhase = phase
-
-            for frameIndex in 0..<frameCount {
-                samples[frameIndex] = Float(sin(localPhase)) * toneAmplitude
-                localPhase += phaseIncrement
-                if localPhase >= 2.0 * Double.pi {
-                    localPhase -= 2.0 * Double.pi
-                }
-            }
+            memcpy(outputData, inputData, byteCount)
+            outputBuffers[channelIndex].mDataByteSize = UInt32(byteCount)
         }
 
-        phase += phaseIncrement * Double(frameCount)
-        phase.formTruncatingRemainder(dividingBy: 2.0 * Double.pi)
         return noErr
     }
 }

@@ -232,18 +232,13 @@ extension AudioEngineManager {
         inputMixer.outputVolume = 2.0
         print("432 Resonance diagnostic: inputMixer.outputVolume=\(inputMixer.outputVolume)")
 
-        print("432 Resonance diagnostic: before creating AVAudioUnitEQ.")
-        let equalizer = AVAudioUnitEQ(numberOfBands: 1)
-        let lowPassBand = equalizer.bands[0]
-        lowPassBand.filterType = .lowPass
-        lowPassBand.frequency = 1_000
-        lowPassBand.bypass = false
-        equalizer.bypass = false
-        print("432 Resonance diagnostic: after creating AVAudioUnitEQ low-pass at 1000 Hz.")
+        print("432 Resonance diagnostic: before instantiating ResonanceAudioUnit.")
+        let resonanceAudioUnit = try await ResonanceAudioUnitRegistry.instantiate()
+        print("432 Resonance diagnostic: after instantiating ResonanceAudioUnit.")
 
         var audioServer: WebSocketAudioServer?
 
-        print("432 Resonance diagnostic: using AVAudioUnitEQ rollback graph. requestedPitch=\(pitchShiftCents), bypass=\(bypassed)")
+        print("432 Resonance diagnostic: using ResonanceAudioUnit passthrough graph. requestedPitch=\(pitchShiftCents), bypass=\(bypassed)")
 
         print("432 Resonance diagnostic: before reading input node.")
         let inputNode = newEngine.inputNode
@@ -284,44 +279,44 @@ extension AudioEngineManager {
         newEngine.attach(inputMixer)
         print("432 Resonance diagnostic: after attaching inputMixer.")
 
-        print("432 Resonance diagnostic: before attaching AVAudioUnitEQ.")
-        newEngine.attach(equalizer)
-        print("432 Resonance diagnostic: after attaching AVAudioUnitEQ.")
+        print("432 Resonance diagnostic: before attaching ResonanceAudioUnit.")
+        newEngine.attach(resonanceAudioUnit)
+        print("432 Resonance diagnostic: after attaching ResonanceAudioUnit.")
 
         // Live audio pipeline:
-        // selected default input -> input mixer -> AVAudioUnitEQ -> main mixer -> selected default output.
+        // selected default input -> input mixer -> ResonanceAudioUnit -> main mixer -> selected default output.
         print("432 Resonance diagnostic: before graph connection inputNode output format=\(inputNode.outputFormat(forBus: 0))")
         print("432 Resonance diagnostic: before graph connection inputMixer output format=\(inputMixer.outputFormat(forBus: 0))")
         print("432 Resonance diagnostic: before graph connection mainMixer input format=\(mainMixer.inputFormat(forBus: 0))")
-        print("432 Resonance diagnostic: before graph connection AVAudioUnitEQ input format=\(equalizer.inputFormat(forBus: 0))")
-        print("432 Resonance diagnostic: before graph connection AVAudioUnitEQ output format=\(equalizer.outputFormat(forBus: 0))")
+        print("432 Resonance diagnostic: before graph connection ResonanceAudioUnit input format=\(resonanceAudioUnit.inputFormat(forBus: 0))")
+        print("432 Resonance diagnostic: before graph connection ResonanceAudioUnit output format=\(resonanceAudioUnit.outputFormat(forBus: 0))")
 
         print("432 Resonance diagnostic: before connecting inputNode to inputMixer with inputNode.outputFormat(forBus: 0).")
         newEngine.connect(inputNode, to: inputMixer, format: inputOutputFormat)
         print("432 Resonance diagnostic: after connecting inputNode to inputMixer with inputNode.outputFormat(forBus: 0).")
 
         let sharedProcessingFormat = inputMixer.outputFormat(forBus: 0)
-        print("432 Resonance diagnostic: shared AVAudioUnitEQ processing format from inputMixer output=\(sharedProcessingFormat)")
+        print("432 Resonance diagnostic: shared ResonanceAudioUnit processing format from inputMixer output=\(sharedProcessingFormat)")
         guard sharedProcessingFormat.channelCount > 0, sharedProcessingFormat.sampleRate > 0 else {
-            throw AudioEngineError.startupFailure("The input mixer did not provide a valid processing format for AVAudioUnitEQ.")
+            throw AudioEngineError.startupFailure("The input mixer did not provide a valid processing format for ResonanceAudioUnit.")
         }
 
-        print("432 Resonance diagnostic: before connecting inputMixer to AVAudioUnitEQ with shared processing format.")
-        newEngine.connect(inputMixer, to: equalizer, format: sharedProcessingFormat)
-        print("432 Resonance diagnostic: after connecting inputMixer to AVAudioUnitEQ with shared processing format.")
+        print("432 Resonance diagnostic: before connecting inputMixer to ResonanceAudioUnit with shared processing format.")
+        newEngine.connect(inputMixer, to: resonanceAudioUnit, format: sharedProcessingFormat)
+        print("432 Resonance diagnostic: after connecting inputMixer to ResonanceAudioUnit with shared processing format.")
 
-        print("432 Resonance diagnostic: after input connection AVAudioUnitEQ input format=\(equalizer.inputFormat(forBus: 0))")
-        print("432 Resonance diagnostic: after input connection AVAudioUnitEQ output format=\(equalizer.outputFormat(forBus: 0))")
+        print("432 Resonance diagnostic: after input connection ResonanceAudioUnit input format=\(resonanceAudioUnit.inputFormat(forBus: 0))")
+        print("432 Resonance diagnostic: after input connection ResonanceAudioUnit output format=\(resonanceAudioUnit.outputFormat(forBus: 0))")
 
-        print("432 Resonance diagnostic: before connecting AVAudioUnitEQ to mainMixer with shared processing format.")
-        newEngine.connect(equalizer, to: mainMixer, format: sharedProcessingFormat)
-        print("432 Resonance diagnostic: after connecting AVAudioUnitEQ to mainMixer with shared processing format.")
+        print("432 Resonance diagnostic: before connecting ResonanceAudioUnit to mainMixer with shared processing format.")
+        newEngine.connect(resonanceAudioUnit, to: mainMixer, format: sharedProcessingFormat)
+        print("432 Resonance diagnostic: after connecting ResonanceAudioUnit to mainMixer with shared processing format.")
 
         print("432 Resonance diagnostic: after graph connection inputNode output format=\(inputNode.outputFormat(forBus: 0))")
         print("432 Resonance diagnostic: after graph connection inputMixer output format=\(inputMixer.outputFormat(forBus: 0))")
         print("432 Resonance diagnostic: after graph connection mainMixer input format=\(mainMixer.inputFormat(forBus: 0))")
-        print("432 Resonance diagnostic: after graph connection AVAudioUnitEQ input format=\(equalizer.inputFormat(forBus: 0))")
-        print("432 Resonance diagnostic: after graph connection AVAudioUnitEQ output format=\(equalizer.outputFormat(forBus: 0))")
+        print("432 Resonance diagnostic: after graph connection ResonanceAudioUnit input format=\(resonanceAudioUnit.inputFormat(forBus: 0))")
+        print("432 Resonance diagnostic: after graph connection ResonanceAudioUnit output format=\(resonanceAudioUnit.outputFormat(forBus: 0))")
 
         if DEBUG_STREAMING {
             print("432 Resonance diagnostic: before starting WebSocket server.")
@@ -344,8 +339,8 @@ extension AudioEngineManager {
         print("432 Resonance diagnostic: pre-start inputNode output format=\(inputNode.outputFormat(forBus: 0))")
         print("432 Resonance diagnostic: pre-start inputMixer input format=\(inputMixer.inputFormat(forBus: 0))")
         print("432 Resonance diagnostic: pre-start inputMixer output format=\(inputMixer.outputFormat(forBus: 0))")
-        print("432 Resonance diagnostic: pre-start AVAudioUnitEQ input format=\(equalizer.inputFormat(forBus: 0))")
-        print("432 Resonance diagnostic: pre-start AVAudioUnitEQ output format=\(equalizer.outputFormat(forBus: 0))")
+        print("432 Resonance diagnostic: pre-start ResonanceAudioUnit input format=\(resonanceAudioUnit.inputFormat(forBus: 0))")
+        print("432 Resonance diagnostic: pre-start ResonanceAudioUnit output format=\(resonanceAudioUnit.outputFormat(forBus: 0))")
         print("432 Resonance diagnostic: pre-start mainMixer input format=\(mainMixer.inputFormat(forBus: 0))")
 
         print("432 Resonance diagnostic: before preparing engine.")
