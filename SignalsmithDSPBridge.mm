@@ -11,6 +11,7 @@ using Stretch = signalsmith::stretch::SignalsmithStretch<float>;
 struct SignalsmithDSPBridgeImplementation {
     std::unique_ptr<Stretch> stretch = std::make_unique<Stretch>();
     NSUInteger channelCount = 0;
+    double pitchCents = 0.0;
     float timeRatio = 1.0F;
     bool configured = false;
 };
@@ -45,11 +46,30 @@ struct SignalsmithDSPBridgeImplementation {
         static_cast<int>(channelCount),
         static_cast<float>(sampleRate)
     );
-    implementation->stretch->setTransposeSemitones(0.0F);
+    implementation->stretch->setTransposeSemitones(
+        static_cast<float>(implementation->pitchCents / 100.0)
+    );
     implementation->channelCount = channelCount;
     implementation->timeRatio = 1.0F;
     implementation->configured = true;
     return YES;
+}
+
+- (double)pitchCents {
+    auto *implementation =
+        static_cast<SignalsmithDSPBridgeImplementation *>(_implementation);
+    return implementation->pitchCents;
+}
+
+- (void)setPitchCents:(double)pitchCents {
+    auto *implementation =
+        static_cast<SignalsmithDSPBridgeImplementation *>(_implementation);
+    implementation->pitchCents = pitchCents;
+    if (implementation->configured) {
+        implementation->stretch->setTransposeSemitones(
+            static_cast<float>(pitchCents / 100.0)
+        );
+    }
 }
 
 - (void)reset {

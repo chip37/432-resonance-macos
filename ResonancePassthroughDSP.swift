@@ -3,6 +3,7 @@ import Darwin
 
 final class ResonancePassthroughDSP {
     private var signalsmithBridge: SignalsmithDSPBridge?
+    private(set) var pitchCents = 0.0
     private var inputBufferList: UnsafeMutablePointer<AudioBufferList>?
     private var inputChannelData: [UnsafeMutableRawPointer] = []
     private var inputChannelCounts: [UInt32] = []
@@ -21,7 +22,13 @@ final class ResonancePassthroughDSP {
             withSampleRate: sampleRate,
             channelCount: UInt(channelCount)
         )
+        bridge.pitchCents = pitchCents
         signalsmithBridge = bridge
+    }
+
+    func setPitchCents(_ pitchCents: Double) {
+        self.pitchCents = pitchCents
+        signalsmithBridge?.pitchCents = pitchCents
     }
 
     func reset() {

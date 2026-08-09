@@ -28,6 +28,10 @@ final class ResonanceAudioUnit: AUAudioUnit {
         false
     }
 
+    func setPitchCents(_ pitchCents: Double) {
+        dsp.setPitchCents(pitchCents)
+    }
+
     override init(
         componentDescription: AudioComponentDescription,
         options: AudioComponentInstantiationOptions = []

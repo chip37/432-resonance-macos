@@ -4,6 +4,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface SignalsmithDSPBridge : NSObject
 
+@property(nonatomic) double pitchCents;
+
 - (BOOL)configureWithSampleRate:(double)sampleRate
                    channelCount:(NSUInteger)channelCount;
 

@@ -235,6 +235,13 @@ extension AudioEngineManager {
         print("432 Resonance diagnostic: before instantiating ResonanceAudioUnit.")
         let resonanceAudioUnit = try await ResonanceAudioUnitRegistry.instantiate()
         print("432 Resonance diagnostic: after instantiating ResonanceAudioUnit.")
+        guard let resonanceImplementation =
+            resonanceAudioUnit.auAudioUnit as? ResonanceAudioUnit else {
+            throw AudioEngineError.startupFailure(
+                "The instantiated Audio Unit is not ResonanceAudioUnit."
+            )
+        }
+        resonanceImplementation.setPitchCents(pitchShiftCents)
 
         var audioServer: WebSocketAudioServer?
 
