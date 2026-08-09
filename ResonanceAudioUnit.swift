@@ -81,6 +81,10 @@ final class ResonanceAudioUnit: AUAudioUnit {
             )
         }
 
+        dsp.configure(
+            sampleRate: inputFormat.sampleRate,
+            channelCount: Int(inputFormat.channelCount)
+        )
         dsp.allocateRenderResources(
             channelCount: Int(inputFormat.channelCount),
             maximumFrameCount: Int(maximumFramesToRender)
@@ -101,6 +105,7 @@ final class ResonanceAudioUnit: AUAudioUnit {
 
     override func reset() {
         super.reset()
+        dsp.reset()
     }
 
     override var internalRenderBlock: AUInternalRenderBlock {

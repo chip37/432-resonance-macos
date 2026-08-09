@@ -2,14 +2,30 @@ import AudioToolbox
 import Darwin
 
 final class ResonancePassthroughDSP {
+    private var signalsmithBridge: SignalsmithDSPBridge?
     private var inputBufferList: UnsafeMutablePointer<AudioBufferList>?
     private var inputChannelData: [UnsafeMutableRawPointer] = []
     private var inputChannelCounts: [UInt32] = []
+    private var inputProcessingChannels: [UnsafePointer<Float>] = []
+    private var outputProcessingChannels: [UnsafeMutablePointer<Float>] = []
     private var channelCount = 0
     private var maximumFrameCount = 0
 
     deinit {
         deallocateRenderResources()
+    }
+
+    func configure(sampleRate: Double, channelCount: Int) {
+        let bridge = SignalsmithDSPBridge()
+        bridge.configure(
+            withSampleRate: sampleRate,
+            channelCount: UInt(channelCount)
+        )
+        signalsmithBridge = bridge
+    }
+
+    func reset() {
+        signalsmithBridge?.reset()
     }
 
     func allocateRenderResources(channelCount: Int, maximumFrameCount: Int) {
@@ -36,6 +52,8 @@ final class ResonancePassthroughDSP {
         let bytesPerChannel = maximumFrameCount * MemoryLayout<Float>.stride
         inputChannelData.reserveCapacity(channelCount)
         inputChannelCounts.reserveCapacity(channelCount)
+        inputProcessingChannels.reserveCapacity(channelCount)
+        outputProcessingChannels.reserveCapacity(channelCount)
 
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
         for channelIndex in 0..<channelCount {
@@ -45,6 +63,12 @@ final class ResonancePassthroughDSP {
             )
             inputChannelData.append(channelData)
             inputChannelCounts.append(1)
+            inputProcessingChannels.append(
+                UnsafePointer(channelData.assumingMemoryBound(to: Float.self))
+            )
+            outputProcessingChannels.append(
+                channelData.assumingMemoryBound(to: Float.self)
+            )
             buffers[channelIndex] = AudioBuffer(
                 mNumberChannels: 1,
                 mDataByteSize: UInt32(bytesPerChannel),
@@ -61,6 +85,8 @@ final class ResonancePassthroughDSP {
         }
         inputChannelData.removeAll(keepingCapacity: false)
         inputChannelCounts.removeAll(keepingCapacity: false)
+        inputProcessingChannels.removeAll(keepingCapacity: false)
+        outputProcessingChannels.removeAll(keepingCapacity: false)
 
         if let inputBufferList {
             UnsafeMutableRawPointer(inputBufferList).deallocate()
@@ -121,13 +147,31 @@ final class ResonancePassthroughDSP {
         }
 
         for channelIndex in 0..<channelCount {
-            guard let inputData = inputBuffers[channelIndex].mData,
+            guard inputBuffers[channelIndex].mData != nil,
                   let outputData = outputBuffers[channelIndex].mData else {
                 return kAudio_ParamError
             }
-
-            memcpy(outputData, inputData, byteCount)
+            outputProcessingChannels[channelIndex] = outputData.assumingMemoryBound(to: Float.self)
             outputBuffers[channelIndex].mDataByteSize = UInt32(byteCount)
+        }
+
+        guard let signalsmithBridge else {
+            return kAudioUnitErr_Uninitialized
+        }
+
+        let processed = inputProcessingChannels.withUnsafeBufferPointer { inputChannels in
+            outputProcessingChannels.withUnsafeMutableBufferPointer { outputChannels in
+                signalsmithBridge.processInputChannels(
+                    inputChannels.baseAddress!,
+                    outputChannels: outputChannels.baseAddress!,
+                    channelCount: UInt(channelCount),
+                    frameCount: UInt(frameCount)
+                )
+            }
+        }
+
+        guard processed else {
+            return kAudio_ParamError
         }
 
         return noErr

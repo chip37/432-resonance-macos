@@ -9,6 +9,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)reset;
 
+- (BOOL)processInputChannels:(const float * _Nonnull const * _Nonnull)inputChannels
+              outputChannels:(float * _Nonnull const * _Nonnull)outputChannels
+                channelCount:(NSUInteger)channelCount
+                  frameCount:(NSUInteger)frameCount;
+
 @end
 
 NS_ASSUME_NONNULL_END
