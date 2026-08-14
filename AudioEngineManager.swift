@@ -37,6 +37,8 @@ final class AudioEngineManager: ObservableObject {
     @Published private(set) var errorMessage = ""
 
     private var engine: AVAudioEngine?
+    private var halOutputManager: HALOutputManager?
+    private var fixedRateConverter: FixedRateAudioConverter?
     private var dspProcessor: DSPProcessor?
     private var webSocketAudioServer: WebSocketAudioServer?
     private var isStarting = false
@@ -113,6 +115,16 @@ final class AudioEngineManager: ObservableObject {
             return
         }
 
+        guard let externalHeadphonesID = deviceManager.outputDevices.first(where: {
+            $0.displayName.compare(
+                "External Headphones",
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) == .orderedSame
+        })?.id else {
+            present(.deviceProblem("External Headphones is not available."))
+            return
+        }
+
         if !deviceManager.hasBlackHoleInput {
             errorMessage = AudioEngineError.missingBlackHole.localizedDescription
         }
@@ -125,7 +137,11 @@ final class AudioEngineManager: ObservableObject {
             print("432 Resonance selected output device: current macOS default -> \(outputName) [\(outputID)]")
             print("432 Resonance pitch value: \(settings.pitchShiftCents) cents")
             print("432 Resonance diagnostic: skipping CoreAudio default-device changes.")
-            try await startEngine(pitchShiftCents: settings.pitchShiftCents, bypassed: settings.isBypassed)
+            try await startEngine(
+                pitchShiftCents: settings.pitchShiftCents,
+                bypassed: settings.isBypassed,
+                externalHeadphonesID: externalHeadphonesID
+            )
             isRunning = true
             statusMessage = settings.isBypassed ? "Running in bypass" : "Processing at \(settings.pitchShiftCents) cents"
         } catch let error as AudioEngineError {
@@ -142,6 +158,23 @@ final class AudioEngineManager: ObservableObject {
     }
 
     func stopEngine() {
+        if let halOutputManager {
+            do {
+                try halOutputManager.stop()
+            } catch {
+                print("432 Resonance AUHAL stop error: \(error.localizedDescription)")
+            }
+            do {
+                try halOutputManager.teardown()
+            } catch {
+                print("432 Resonance AUHAL teardown error: \(error.localizedDescription)")
+            }
+            self.halOutputManager = nil
+        }
+        fixedRateConverter?.stop()
+        fixedRateConverter?.teardown()
+        fixedRateConverter = nil
+
         guard let activeEngine = engine else {
             print("432 Resonance lifecycle: stop requested with no active engine.")
             isRunning = false
@@ -214,7 +247,11 @@ final class AudioEngineManager: ObservableObject {
 }
 
 extension AudioEngineManager {
-    private func startEngine(pitchShiftCents: Double, bypassed: Bool) async throws {
+    private func startEngine(
+        pitchShiftCents: Double,
+        bypassed: Bool,
+        externalHeadphonesID: AudioDeviceID
+    ) async throws {
         print("432 Resonance diagnostic: before creating AVAudioEngine.")
         let newEngine = AVAudioEngine()
         print("432 Resonance diagnostic: after creating AVAudioEngine.")
@@ -360,6 +397,93 @@ extension AudioEngineManager {
             print("432 Resonance diagnostic: after starting engine.")
             print("432 Resonance lifecycle: engine \(engineIdentity(newEngine)) isRunning after start=\(newEngine.isRunning)")
             print("432 Resonance engine started.")
+
+            guard let (processedRingBuffer, processedSampleRate, channelCount) =
+                resonanceImplementation.processedRingAccess() else {
+                throw AudioEngineError.startupFailure(
+                    "The processed-audio ring buffer is unavailable."
+                )
+            }
+
+            let outputSampleRate = try HALOutputManager.outputSampleRate(
+                deviceID: externalHeadphonesID
+            )
+            let converter = FixedRateAudioConverter()
+            do {
+                try converter.configure(
+                    withSourceRing: processedRingBuffer,
+                    sourceSampleRate: processedSampleRate,
+                    outputSampleRate: outputSampleRate,
+                    channelCount: UInt(channelCount)
+                )
+            } catch {
+                throw AudioEngineError.deviceProblem(
+                    "Could not configure fixed sample-rate conversion: " +
+                    error.localizedDescription
+                )
+            }
+            guard let convertedRingBuffer = converter.outputRingBuffer else {
+                throw AudioEngineError.startupFailure(
+                    "The converted-audio ring buffer is unavailable."
+                )
+            }
+            fixedRateConverter = converter
+            converter.start()
+
+            let primeFrames = Int(ceil(outputSampleRate * 0.06))
+            let primeDeadline = ContinuousClock.now + .seconds(2)
+            while convertedRingBuffer.availableFrames < primeFrames {
+                guard ContinuousClock.now < primeDeadline else {
+                    throw AudioEngineError.startupFailure(
+                        "Converted audio did not reach the 60 ms startup level."
+                    )
+                }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+
+            let testHALOutputManager = HALOutputManager()
+            do {
+                try testHALOutputManager.configure(
+                    deviceID: externalHeadphonesID,
+                    ringBuffer: convertedRingBuffer,
+                    processedSampleRate: outputSampleRate
+                )
+                halOutputManager = testHALOutputManager
+                try testHALOutputManager.start()
+            } catch {
+                throw AudioEngineError.deviceProblem(
+                    "Could not start processed audio on External Headphones: " +
+                    error.localizedDescription
+                )
+            }
+            Task { @MainActor [weak self, weak resonanceImplementation, weak testHALOutputManager, weak converter] in
+                try? await Task.sleep(for: .seconds(1))
+                guard let self,
+                      let resonanceImplementation,
+                      let testHALOutputManager,
+                      let converter,
+                      self.halOutputManager === testHALOutputManager else {
+                    return
+                }
+                let snapshot = resonanceImplementation.processedRingSnapshot()
+                let convertedRing = converter.outputRingBuffer
+                self.statusMessage =
+                    "sourceRingAvailableFrames=\(snapshot.availableFrames)\n" +
+                    "convertedRingAvailableFrames=\(convertedRing?.availableFrames ?? 0)\n" +
+                    "sourceRingOverflowCount=\(snapshot.overflowCount)\n" +
+                    "convertedRingOverflowCount=\(convertedRing?.overflowCount ?? 0)\n" +
+                    "halUnderflowCount=\(testHALOutputManager.underflowCount)\n" +
+                    "sourceSampleRate=\(converter.sourceSampleRate)\n" +
+                    "outputSampleRate=\(converter.outputSampleRate)\n" +
+                    "sourcePeak=\(converter.sourcePeak)\n" +
+                    "convertedPeak=\(converter.convertedPeak)\n" +
+                    "halOutputPeak=\(testHALOutputManager.outputPeak)\n" +
+                    "converterProducedFrames=\(converter.converterProducedFrames)\n" +
+                    "converterRequestedFrames=\(converter.converterRequestedFrames)"
+            }
+        } catch let error as AudioEngineError {
+            audioServer?.stop()
+            throw error
         } catch {
             let nsError = error as NSError
             print("432 Resonance engine start NSError domain=\(nsError.domain), code=\(nsError.code), userInfo=\(nsError.userInfo)")

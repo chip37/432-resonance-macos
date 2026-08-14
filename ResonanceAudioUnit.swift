@@ -32,6 +32,14 @@ final class ResonanceAudioUnit: AUAudioUnit {
         dsp.setPitchCents(pitchCents)
     }
 
+    func processedRingSnapshot() -> ProcessedAudioRingSnapshot {
+        dsp.processedRingSnapshot()
+    }
+
+    func processedRingAccess() -> (RealtimeAudioRingBuffer, Double, Int)? {
+        dsp.processedRingAccess()
+    }
+
     override init(
         componentDescription: AudioComponentDescription,
         options: AudioComponentInstantiationOptions = []

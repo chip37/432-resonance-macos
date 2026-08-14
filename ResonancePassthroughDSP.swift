@@ -1,8 +1,15 @@
 import AudioToolbox
 import Darwin
 
+struct ProcessedAudioRingSnapshot {
+    let availableFrames: Int
+    let capacityFrames: Int
+    let overflowCount: UInt64
+}
+
 final class ResonancePassthroughDSP {
     private var signalsmithBridge: SignalsmithDSPBridge?
+    private var processedRingBuffer: RealtimeAudioRingBuffer?
     private(set) var pitchCents = 0.0
     private var inputBufferList: UnsafeMutablePointer<AudioBufferList>?
     private var inputChannelData: [UnsafeMutableRawPointer] = []
@@ -11,12 +18,14 @@ final class ResonancePassthroughDSP {
     private var outputProcessingChannels: [UnsafeMutablePointer<Float>] = []
     private var channelCount = 0
     private var maximumFrameCount = 0
+    private var sampleRate = 0.0
 
     deinit {
         deallocateRenderResources()
     }
 
     func configure(sampleRate: Double, channelCount: Int) {
+        self.sampleRate = sampleRate
         let bridge = SignalsmithDSPBridge()
         bridge.configure(
             withSampleRate: sampleRate,
@@ -33,6 +42,30 @@ final class ResonancePassthroughDSP {
 
     func reset() {
         signalsmithBridge?.reset()
+        processedRingBuffer?.reset()
+    }
+
+    func processedRingSnapshot() -> ProcessedAudioRingSnapshot {
+        guard let processedRingBuffer else {
+            return ProcessedAudioRingSnapshot(
+                availableFrames: 0,
+                capacityFrames: 0,
+                overflowCount: 0
+            )
+        }
+
+        return ProcessedAudioRingSnapshot(
+            availableFrames: Int(processedRingBuffer.availableFrames),
+            capacityFrames: Int(processedRingBuffer.capacityFrames),
+            overflowCount: processedRingBuffer.overflowCount
+        )
+    }
+
+    func processedRingAccess() -> (RealtimeAudioRingBuffer, Double, Int)? {
+        guard let processedRingBuffer, sampleRate > 0 else {
+            return nil
+        }
+        return (processedRingBuffer, sampleRate, channelCount)
     }
 
     func allocateRenderResources(channelCount: Int, maximumFrameCount: Int) {
@@ -40,6 +73,17 @@ final class ResonancePassthroughDSP {
 
         self.channelCount = channelCount
         self.maximumFrameCount = maximumFrameCount
+
+        let quarterSecondFrameCount = Int(ceil(sampleRate * 0.25))
+        let capacityFrames = max(quarterSecondFrameCount, maximumFrameCount)
+        let ringBuffer = RealtimeAudioRingBuffer()
+        guard ringBuffer.configure(
+            withChannelCount: UInt(channelCount),
+            capacityFrames: UInt(capacityFrames)
+        ) else {
+            return
+        }
+        processedRingBuffer = ringBuffer
 
         let bufferListSize = MemoryLayout<AudioBufferList>.size
             + max(0, channelCount - 1) * MemoryLayout<AudioBuffer>.stride
@@ -87,6 +131,8 @@ final class ResonancePassthroughDSP {
     }
 
     func deallocateRenderResources() {
+        processedRingBuffer = nil
+
         for channelData in inputChannelData {
             channelData.deallocate()
         }
@@ -179,6 +225,16 @@ final class ResonancePassthroughDSP {
 
         guard processed else {
             return kAudio_ParamError
+        }
+
+        if let processedRingBuffer {
+            outputProcessingChannels.withUnsafeBufferPointer { outputChannels in
+                _ = processedRingBuffer.writeChannels(
+                    outputChannels.baseAddress!,
+                    channelCount: UInt(channelCount),
+                    frameCount: UInt(frameCount)
+                )
+            }
         }
 
         return noErr
