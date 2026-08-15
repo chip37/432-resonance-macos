@@ -5,13 +5,37 @@ import Network
 
 final class WebSocketAudioServer {
     private let port: UInt16
+    private let sampleRate: Double
+    private let channelCount: Int
     private let queue = DispatchQueue(label: "com.local.resonance432.websocket-audio-server")
+    private let stateLock = NSLock()
     private var listener: NWListener?
     private var clients: [UUID: NWConnection] = [:]
-    private var broadcastLogCount = 0
+    private var audioSendInFlight = false
+    private var _isListening = false
+    private var _connectedClientCount = 0
+    private var _droppedAudioFrames: UInt64 = 0
 
-    init(port: UInt16 = 8765) {
+    init(sampleRate: Double, channelCount: Int, port: UInt16 = 8765) {
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
         self.port = port
+    }
+
+    var connectedClientCount: Int {
+        stateLock.withLock { _connectedClientCount }
+    }
+
+    var isListening: Bool {
+        stateLock.withLock { _isListening }
+    }
+
+    var listeningPort: UInt16 {
+        port
+    }
+
+    var droppedAudioFrames: UInt64 {
+        stateLock.withLock { _droppedAudioFrames }
     }
 
     func start() throws {
@@ -20,13 +44,17 @@ final class WebSocketAudioServer {
         parameters.allowLocalEndpointReuse = true
 
         let newListener = try NWListener(using: parameters, on: nwPort)
-        newListener.stateUpdateHandler = { state in
+        newListener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
             switch state {
             case .ready:
+                self.stateLock.withLock { self._isListening = true }
                 print("432 Resonance WebSocket server listening at ws://127.0.0.1:\(self.port)/audio")
             case .failed(let error):
+                self.stateLock.withLock { self._isListening = false }
                 print("432 Resonance WebSocket server error: \(error)")
             case .cancelled:
+                self.stateLock.withLock { self._isListening = false }
                 print("432 Resonance WebSocket server stopped.")
             default:
                 break
@@ -45,40 +73,54 @@ final class WebSocketAudioServer {
         queue.async {
             self.clients.values.forEach { $0.cancel() }
             self.clients.removeAll()
+            self.stateLock.withLock {
+                self._connectedClientCount = 0
+                self.audioSendInFlight = false
+                self._isListening = false
+            }
             self.listener?.cancel()
             self.listener = nil
-            self.broadcastLogCount = 0
         }
     }
 
-    func broadcastPCMChunk(_ data: Data, sampleRate: Double, channelCount: AVAudioChannelCount) {
+    @discardableResult
+    func broadcastPCMChunk(_ data: Data, frameCount: Int) -> Bool {
+        let accepted = stateLock.withLock {
+            guard _connectedClientCount > 0, !audioSendInFlight else {
+                _droppedAudioFrames += UInt64(frameCount)
+                return false
+            }
+            audioSendInFlight = true
+            return true
+        }
+        guard accepted else {
+            return false
+        }
+
         queue.async {
             guard !self.clients.isEmpty else {
+                self.stateLock.withLock { self.audioSendInFlight = false }
                 return
             }
 
-            self.broadcastLogCount += 1
             let frame = Self.binaryWebSocketFrame(payload: data)
-
-            if self.broadcastLogCount <= 5 || self.broadcastLogCount.isMultiple(of: 50) {
-                print(
-                    "432 Resonance WebSocket broadcast #\(self.broadcastLogCount): " +
-                    "chunkBytes=\(data.count), " +
-                    "sampleRate=\(sampleRate), " +
-                    "channels=\(channelCount), " +
-                    "clients=\(self.clients.count)"
-                )
-            }
-
+            let sendGroup = DispatchGroup()
             for (clientID, connection) in self.clients {
+                sendGroup.enter()
                 connection.send(content: frame, completion: .contentProcessed { [weak self] error in
+                    defer { sendGroup.leave() }
+                    guard let self else { return }
                     if let error {
                         print("432 Resonance WebSocket send error for client \(clientID): \(error)")
-                        self?.removeClient(clientID)
+                        self.removeClient(clientID)
                     }
                 })
             }
+            sendGroup.notify(queue: self.queue) {
+                self.stateLock.withLock { self.audioSendInFlight = false }
+            }
         }
+        return true
     }
 }
 
@@ -142,13 +184,12 @@ private extension WebSocketAudioServer {
         }
 
         let acceptKey = Self.acceptKey(for: key)
-        let response = """
-        HTTP/1.1 101 Switching Protocols\r
-        Upgrade: websocket\r
-        Connection: Upgrade\r
-        Sec-WebSocket-Accept: \(acceptKey)\r
-        \r
-        """
+        let response =
+            "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "Sec-WebSocket-Accept: \(acceptKey)\r\n" +
+            "\r\n"
 
         connection.send(content: response.data(using: .utf8), completion: .contentProcessed { [weak self] error in
             guard let self else {
@@ -163,7 +204,13 @@ private extension WebSocketAudioServer {
 
             self.queue.async {
                 self.clients[clientID] = connection
+                self.stateLock.withLock { self._connectedClientCount = self.clients.count }
                 print("432 Resonance WebSocket client connected: \(clientID). clients=\(self.clients.count)")
+                let metadata = "{\"type\":\"audio-format\",\"sampleRate\":\(self.sampleRate),\"channelCount\":\(self.channelCount),\"sampleFormat\":\"float32-le-interleaved\"}"
+                connection.send(
+                    content: Self.textWebSocketFrame(payload: Data(metadata.utf8)),
+                    completion: .idempotent
+                )
                 self.receiveClientControlFrames(from: connection, clientID: clientID)
             }
         })
@@ -205,6 +252,7 @@ private extension WebSocketAudioServer {
             }
 
             connection.cancel()
+            self.stateLock.withLock { self._connectedClientCount = self.clients.count }
             print("432 Resonance WebSocket client disconnected: \(clientID). clients=\(self.clients.count)")
         }
     }
@@ -225,8 +273,16 @@ private extension WebSocketAudioServer {
     }
 
     static func binaryWebSocketFrame(payload: Data) -> Data {
+        webSocketFrame(opcode: 0x82, payload: payload)
+    }
+
+    static func textWebSocketFrame(payload: Data) -> Data {
+        webSocketFrame(opcode: 0x81, payload: payload)
+    }
+
+    static func webSocketFrame(opcode: UInt8, payload: Data) -> Data {
         var frame = Data()
-        frame.append(0x82)
+        frame.append(opcode)
 
         switch payload.count {
         case 0...125:

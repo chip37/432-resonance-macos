@@ -7,9 +7,17 @@ struct ProcessedAudioRingSnapshot {
     let overflowCount: UInt64
 }
 
+struct StreamingAudioRingSnapshot {
+    let availableFrames: Int
+    let capacityFrames: Int
+    let overflowCount: UInt64
+}
+
 final class ResonancePassthroughDSP {
     private var signalsmithBridge: SignalsmithDSPBridge?
     private var processedRingBuffer: RealtimeAudioRingBuffer?
+    private var streamingRingBuffer: RealtimeAudioRingBuffer?
+    private var streamingEnabled = false
     private(set) var pitchCents = 0.0
     private var inputBufferList: UnsafeMutablePointer<AudioBufferList>?
     private var inputChannelData: [UnsafeMutableRawPointer] = []
@@ -40,9 +48,14 @@ final class ResonancePassthroughDSP {
         signalsmithBridge?.pitchCents = pitchCents
     }
 
+    func setStreamingEnabled(_ enabled: Bool) {
+        streamingEnabled = enabled
+    }
+
     func reset() {
         signalsmithBridge?.reset()
         processedRingBuffer?.reset()
+        streamingRingBuffer?.reset()
     }
 
     func processedRingSnapshot() -> ProcessedAudioRingSnapshot {
@@ -68,6 +81,29 @@ final class ResonancePassthroughDSP {
         return (processedRingBuffer, sampleRate, channelCount)
     }
 
+    func streamingRingSnapshot() -> StreamingAudioRingSnapshot {
+        guard let streamingRingBuffer else {
+            return StreamingAudioRingSnapshot(
+                availableFrames: 0,
+                capacityFrames: 0,
+                overflowCount: 0
+            )
+        }
+
+        return StreamingAudioRingSnapshot(
+            availableFrames: Int(streamingRingBuffer.availableFrames),
+            capacityFrames: Int(streamingRingBuffer.capacityFrames),
+            overflowCount: streamingRingBuffer.overflowCount
+        )
+    }
+
+    func streamingRingAccess() -> (RealtimeAudioRingBuffer, Double, Int)? {
+        guard let streamingRingBuffer, sampleRate > 0 else {
+            return nil
+        }
+        return (streamingRingBuffer, sampleRate, channelCount)
+    }
+
     func allocateRenderResources(channelCount: Int, maximumFrameCount: Int) {
         deallocateRenderResources()
 
@@ -84,6 +120,18 @@ final class ResonancePassthroughDSP {
             return
         }
         processedRingBuffer = ringBuffer
+
+        if streamingEnabled {
+            let streamingRing = RealtimeAudioRingBuffer()
+            guard streamingRing.configure(
+                withChannelCount: UInt(channelCount),
+                capacityFrames: UInt(capacityFrames)
+            ) else {
+                processedRingBuffer = nil
+                return
+            }
+            streamingRingBuffer = streamingRing
+        }
 
         let bufferListSize = MemoryLayout<AudioBufferList>.size
             + max(0, channelCount - 1) * MemoryLayout<AudioBuffer>.stride
@@ -132,6 +180,7 @@ final class ResonancePassthroughDSP {
 
     func deallocateRenderResources() {
         processedRingBuffer = nil
+        streamingRingBuffer = nil
 
         for channelData in inputChannelData {
             channelData.deallocate()
@@ -230,6 +279,17 @@ final class ResonancePassthroughDSP {
         if let processedRingBuffer {
             outputProcessingChannels.withUnsafeBufferPointer { outputChannels in
                 _ = processedRingBuffer.writeChannels(
+                    outputChannels.baseAddress!,
+                    channelCount: UInt(channelCount),
+                    frameCount: UInt(frameCount)
+                )
+            }
+        }
+
+
+        if let streamingRingBuffer {
+            outputProcessingChannels.withUnsafeBufferPointer { outputChannels in
+                _ = streamingRingBuffer.writeChannels(
                     outputChannels.baseAddress!,
                     channelCount: UInt(channelCount),
                     frameCount: UInt(frameCount)

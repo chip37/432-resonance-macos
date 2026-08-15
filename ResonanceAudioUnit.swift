@@ -32,12 +32,24 @@ final class ResonanceAudioUnit: AUAudioUnit {
         dsp.setPitchCents(pitchCents)
     }
 
+    func setStreamingEnabled(_ enabled: Bool) {
+        dsp.setStreamingEnabled(enabled)
+    }
+
     func processedRingSnapshot() -> ProcessedAudioRingSnapshot {
         dsp.processedRingSnapshot()
     }
 
     func processedRingAccess() -> (RealtimeAudioRingBuffer, Double, Int)? {
         dsp.processedRingAccess()
+    }
+
+    func streamingRingSnapshot() -> StreamingAudioRingSnapshot {
+        dsp.streamingRingSnapshot()
+    }
+
+    func streamingRingAccess() -> (RealtimeAudioRingBuffer, Double, Int)? {
+        dsp.streamingRingAccess()
     }
 
     override init(

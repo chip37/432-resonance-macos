@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-private let DEBUG_STREAMING = false
+private let DEBUG_STREAMING = true
 private let DEBUG_AUDIO_TAP = false
 
 enum AudioEngineError: LocalizedError {
@@ -41,6 +41,7 @@ final class AudioEngineManager: ObservableObject {
     private var fixedRateConverter: FixedRateAudioConverter?
     private var dspProcessor: DSPProcessor?
     private var webSocketAudioServer: WebSocketAudioServer?
+    private var streamingAudioWorker: StreamingAudioWorker?
     private var isStarting = false
 
     func requestMicrophonePermission() async -> Bool {
@@ -158,6 +159,11 @@ final class AudioEngineManager: ObservableObject {
     }
 
     func stopEngine() {
+        streamingAudioWorker?.stop()
+        streamingAudioWorker = nil
+        webSocketAudioServer?.stop()
+        webSocketAudioServer = nil
+
         if let halOutputManager {
             do {
                 try halOutputManager.stop()
@@ -184,11 +190,6 @@ final class AudioEngineManager: ObservableObject {
 
         print("432 Resonance lifecycle: stopping active engine \(engineIdentity(activeEngine)). isRunningBeforeStop=\(activeEngine.isRunning)")
 
-        if DEBUG_AUDIO_TAP {
-            dspProcessor?.timePitch.removeTap(onBus: 0)
-        }
-
-        webSocketAudioServer?.stop()
         activeEngine.stop()
         print("432 Resonance lifecycle: engine \(engineIdentity(activeEngine)) isRunning after stop=\(activeEngine.isRunning)")
 
@@ -198,7 +199,6 @@ final class AudioEngineManager: ObservableObject {
 
         engine = nil
         dspProcessor = nil
-        webSocketAudioServer = nil
         isRunning = false
         statusMessage = "Stopped"
     }
@@ -279,8 +279,7 @@ extension AudioEngineManager {
             )
         }
         resonanceImplementation.setPitchCents(pitchShiftCents)
-
-        var audioServer: WebSocketAudioServer?
+        resonanceImplementation.setStreamingEnabled(DEBUG_STREAMING)
 
         print("432 Resonance diagnostic: using ResonanceAudioUnit passthrough graph. requestedPitch=\(pitchShiftCents), bypass=\(bypassed)")
 
@@ -362,23 +361,7 @@ extension AudioEngineManager {
         print("432 Resonance diagnostic: after graph connection ResonanceAudioUnit input format=\(resonanceAudioUnit.inputFormat(forBus: 0))")
         print("432 Resonance diagnostic: after graph connection ResonanceAudioUnit output format=\(resonanceAudioUnit.outputFormat(forBus: 0))")
 
-        if DEBUG_STREAMING {
-            print("432 Resonance diagnostic: before starting WebSocket server.")
-            let server = WebSocketAudioServer()
-            try server.start()
-            print("432 Resonance diagnostic: after starting WebSocket server.")
-            audioServer = server
-        } else {
-            print("432 Resonance DEBUG_STREAMING=false. WebSocket server and audio broadcasting are disabled.")
-        }
-
-        if DEBUG_AUDIO_TAP {
-            print("432 Resonance diagnostic: before installing processed tap.")
-            installProcessedAudioTap(on: dsp.timePitch, audioServer: audioServer)
-            print("432 Resonance diagnostic: after installing processed tap.")
-        } else {
-            print("432 Resonance DEBUG_AUDIO_TAP=false. Processed audio tap, tap logging, and AVAudioPCMBuffer access are disabled.")
-        }
+        print("432 Resonance DEBUG_AUDIO_TAP=false. No AVAudioNode tap is installed.")
 
         print("432 Resonance diagnostic: pre-start inputNode output format=\(inputNode.outputFormat(forBus: 0))")
         print("432 Resonance diagnostic: pre-start inputMixer input format=\(inputMixer.inputFormat(forBus: 0))")
@@ -456,6 +439,36 @@ extension AudioEngineManager {
                     error.localizedDescription
                 )
             }
+
+            if DEBUG_STREAMING {
+                if let (streamingRing, streamingSampleRate, streamingChannelCount) =
+                    resonanceImplementation.streamingRingAccess() {
+                    do {
+                        let server = WebSocketAudioServer(
+                            sampleRate: streamingSampleRate,
+                            channelCount: streamingChannelCount
+                        )
+                        try server.start()
+                        let worker = StreamingAudioWorker(
+                            ringBuffer: streamingRing,
+                            channelCount: streamingChannelCount,
+                            server: server
+                        )
+                        webSocketAudioServer = server
+                        streamingAudioWorker = worker
+                        worker.start()
+                    } catch {
+                        streamingAudioWorker?.stop()
+                        streamingAudioWorker = nil
+                        webSocketAudioServer?.stop()
+                        webSocketAudioServer = nil
+                        print("432 Resonance streaming disabled after startup error: \(error.localizedDescription)")
+                    }
+                } else {
+                    print("432 Resonance streaming disabled because its dedicated ring is unavailable.")
+                }
+            }
+
             Task { @MainActor [weak self, weak resonanceImplementation, weak testHALOutputManager, weak converter] in
                 try? await Task.sleep(for: .seconds(1))
                 guard let self,
@@ -479,91 +492,22 @@ extension AudioEngineManager {
                     "convertedPeak=\(converter.convertedPeak)\n" +
                     "halOutputPeak=\(testHALOutputManager.outputPeak)\n" +
                     "converterProducedFrames=\(converter.converterProducedFrames)\n" +
-                    "converterRequestedFrames=\(converter.converterRequestedFrames)"
+                    "converterRequestedFrames=\(converter.converterRequestedFrames)\n" +
+                    "websocketListening=\(self.webSocketAudioServer?.isListening ?? false)\n" +
+                    "websocketPort=\(self.webSocketAudioServer?.listeningPort ?? 0)\n" +
+                    "streamingRingAvailableFrames=\(resonanceImplementation.streamingRingSnapshot().availableFrames)\n" +
+                    "streamingRingOverflowCount=\(resonanceImplementation.streamingRingSnapshot().overflowCount)\n" +
+                    "connectedStreamingClients=\(self.webSocketAudioServer?.connectedClientCount ?? 0)\n" +
+                    "streamedFrames=\(self.streamingAudioWorker?.streamedFrames ?? 0)\n" +
+                    "droppedStreamingFrames=\(self.streamingAudioWorker?.droppedFrames ?? 0)"
             }
         } catch let error as AudioEngineError {
-            audioServer?.stop()
             throw error
         } catch {
             let nsError = error as NSError
             print("432 Resonance engine start NSError domain=\(nsError.domain), code=\(nsError.code), userInfo=\(nsError.userInfo)")
-            audioServer?.stop()
             throw AudioEngineError.startupFailure(error.localizedDescription)
         }
-
-        webSocketAudioServer = audioServer
-    }
-
-    private func installProcessedAudioTap(on timePitchNode: AVAudioUnitTimePitch, audioServer: WebSocketAudioServer?) {
-        var tapLogCount = 0
-        let logQueue = DispatchQueue(label: "com.local.resonance432.processed-audio-tap-log")
-
-        // This tap is installed on the output bus of AVAudioUnitTimePitch.
-        // That point is downstream of pitch shifting, so buffers seen here are processed audio.
-        timePitchNode.installTap(onBus: 0, bufferSize: 4096, format: nil) { buffer, _ in
-            tapLogCount += 1
-
-            let format = buffer.format
-            let frameCount = buffer.frameLength
-            let sampleRate = format.sampleRate
-            let channelCount = format.channelCount
-            let isBypassed = timePitchNode.bypass
-            let messageNumber = tapLogCount
-
-            if let audioServer {
-                let pcmData = Self.interleavedFloat32PCMData(from: buffer)
-                audioServer.broadcastPCMChunk(pcmData, sampleRate: sampleRate, channelCount: channelCount)
-            }
-
-            // Log the first few buffers, then every 50th buffer, to prove activity without flooding the console.
-            guard tapLogCount <= 5 || tapLogCount.isMultiple(of: 50) else {
-                return
-            }
-
-            logQueue.async {
-                print(
-                    "432 Resonance processed tap #\(messageNumber): " +
-                    "source=AVAudioUnitTimePitch output, " +
-                    "processedStage=true, " +
-                    "format=\(format), " +
-                    "frames=\(frameCount), " +
-                    "sampleRate=\(sampleRate), " +
-                    "channels=\(channelCount), " +
-                    "bypass=\(isBypassed)"
-                )
-            }
-        }
-
-        print("432 Resonance processed tap installed on AVAudioUnitTimePitch output bus after pitch shift stage.")
-    }
-
-    private static func interleavedFloat32PCMData(from buffer: AVAudioPCMBuffer) -> Data {
-        let frameCount = Int(buffer.frameLength)
-        let channelCount = Int(buffer.format.channelCount)
-        guard frameCount > 0, channelCount > 0 else {
-            return Data()
-        }
-
-        if let floatChannelData = buffer.floatChannelData {
-            var interleavedSamples = [Float]()
-            interleavedSamples.reserveCapacity(frameCount * channelCount)
-
-            for frameIndex in 0..<frameCount {
-                for channelIndex in 0..<channelCount {
-                    interleavedSamples.append(floatChannelData[channelIndex][frameIndex])
-                }
-            }
-
-            return interleavedSamples.withUnsafeBufferPointer { Data(buffer: $0) }
-        }
-
-        let audioBufferList = buffer.audioBufferList.pointee
-        guard audioBufferList.mNumberBuffers > 0,
-              let dataPointer = audioBufferList.mBuffers.mData else {
-            return Data()
-        }
-
-        return Data(bytes: dataPointer, count: Int(audioBufferList.mBuffers.mDataByteSize))
     }
 
     private func present(_ error: AudioEngineError) {
