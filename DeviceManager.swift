@@ -9,9 +9,14 @@ struct AudioDevice: Identifiable, Hashable {
     let name: String
     let hasInput: Bool
     let hasOutput: Bool
+    let transportType: UInt32
 
     var displayName: String {
         name.isEmpty ? "Device \(id)" : name
+    }
+
+    var isBuiltInOutput: Bool {
+        hasOutput && transportType == kAudioDeviceTransportTypeBuiltIn
     }
 }
 
@@ -42,6 +47,28 @@ final class DeviceManager: ObservableObject {
         let deviceID = Self.defaultDeviceID(selector: kAudioHardwarePropertyDefaultOutputDevice)
         print("432 Resonance CoreAudio diagnostic: after defaultOutputDeviceID. deviceID=\(String(describing: deviceID))")
         return deviceID
+    }
+
+    func resolvedOutputDeviceID(selectedDeviceID: AudioDeviceID?) -> AudioDeviceID? {
+        if let selectedDeviceID,
+           outputDevices.contains(where: { $0.id == selectedDeviceID }) {
+            return selectedDeviceID
+        }
+
+        if let externalHeadphones = outputDevices.first(where: {
+            $0.displayName.compare(
+                "External Headphones",
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) == .orderedSame
+        }) {
+            return externalHeadphones.id
+        }
+
+        if let builtInOutput = outputDevices.first(where: \.isBuiltInOutput) {
+            return builtInOutput.id
+        }
+
+        return nil
     }
 }
 
@@ -75,9 +102,29 @@ extension DeviceManager {
                 id: deviceID,
                 name: deviceName(for: deviceID),
                 hasInput: streamCount(for: deviceID, scope: kAudioDevicePropertyScopeInput) > 0,
-                hasOutput: streamCount(for: deviceID, scope: kAudioDevicePropertyScopeOutput) > 0
+                hasOutput: streamCount(for: deviceID, scope: kAudioDevicePropertyScopeOutput) > 0,
+                transportType: transportType(for: deviceID)
             )
         }
+    }
+
+    private static func transportType(for deviceID: AudioDeviceID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transportType: UInt32 = 0
+        var dataSize = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(
+            deviceID,
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &transportType
+        )
+        return status == noErr ? transportType : 0
     }
 
     private static func deviceName(for deviceID: AudioDeviceID) -> String {

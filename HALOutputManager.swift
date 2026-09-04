@@ -16,7 +16,7 @@ enum HALOutputError: LocalizedError {
         case .invalidHardwareFormat:
             return "The selected output device does not expose a valid stereo hardware format."
         case .sampleRateMismatch(let processed, let output):
-            return "Processed audio is \(processed) Hz, but External Headphones uses \(output) Hz. Sample-rate conversion is not enabled."
+            return "Processed audio is \(processed) Hz, but the selected output device uses \(output) Hz. Sample-rate conversion is not enabled."
         case .coreAudio(let operation, let status):
             return "\(operation) failed with OSStatus \(status)."
         }

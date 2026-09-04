@@ -104,27 +104,20 @@ final class AudioEngineManager: ObservableObject {
         deviceManager.refreshDevices()
 
         print("432 Resonance diagnostic: selected UI input is \(deviceDescription(settings.selectedInputDeviceID, in: deviceManager.inputDevices)); diagnostic mode will use current macOS default input.")
-        print("432 Resonance diagnostic: selected UI output is \(deviceDescription(settings.selectedOutputDeviceID, in: deviceManager.outputDevices)); diagnostic mode will use current macOS default output.")
+        print("432 Resonance diagnostic: selected UI output is \(deviceDescription(settings.selectedOutputDeviceID, in: deviceManager.outputDevices)).")
 
         guard let inputID = deviceManager.defaultInputDeviceID() else {
             present(.missingInputDevice)
             return
         }
 
-        guard let outputID = deviceManager.defaultOutputDeviceID() else {
+        guard let outputID = deviceManager.resolvedOutputDeviceID(
+            selectedDeviceID: settings.selectedOutputDeviceID
+        ), let outputDevice = deviceManager.outputDevices.first(where: { $0.id == outputID }) else {
             present(.missingOutputDevice)
             return
         }
-
-        guard let externalHeadphonesID = deviceManager.outputDevices.first(where: {
-            $0.displayName.compare(
-                "External Headphones",
-                options: [.caseInsensitive, .diacriticInsensitive]
-            ) == .orderedSame
-        })?.id else {
-            present(.deviceProblem("External Headphones is not available."))
-            return
-        }
+        settings.selectedOutputDeviceID = outputID
 
         if !deviceManager.hasBlackHoleInput {
             errorMessage = AudioEngineError.missingBlackHole.localizedDescription
@@ -133,15 +126,16 @@ final class AudioEngineManager: ObservableObject {
         do {
             statusMessage = "Preparing current system devices..."
             let inputName = deviceManager.inputDevices.first { $0.id == inputID }?.displayName ?? "Device \(inputID)"
-            let outputName = deviceManager.outputDevices.first { $0.id == outputID }?.displayName ?? "Device \(outputID)"
+            let outputName = outputDevice.displayName
             print("432 Resonance selected input device: current macOS default -> \(inputName) [\(inputID)]")
-            print("432 Resonance selected output device: current macOS default -> \(outputName) [\(outputID)]")
+            print("432 Resonance selected processed-audio output device: \(outputName) [\(outputID)]")
             print("432 Resonance pitch value: \(settings.pitchShiftCents) cents")
             print("432 Resonance diagnostic: skipping CoreAudio default-device changes.")
             try await startEngine(
                 pitchShiftCents: settings.pitchShiftCents,
                 bypassed: settings.isBypassed,
-                externalHeadphonesID: externalHeadphonesID
+                outputDeviceID: outputID,
+                outputDeviceName: outputName
             )
             isRunning = true
             statusMessage = settings.isBypassed ? "Running in bypass" : "Processing at \(settings.pitchShiftCents) cents"
@@ -250,7 +244,8 @@ extension AudioEngineManager {
     private func startEngine(
         pitchShiftCents: Double,
         bypassed: Bool,
-        externalHeadphonesID: AudioDeviceID
+        outputDeviceID: AudioDeviceID,
+        outputDeviceName: String
     ) async throws {
         print("432 Resonance diagnostic: before creating AVAudioEngine.")
         let newEngine = AVAudioEngine()
@@ -389,7 +384,7 @@ extension AudioEngineManager {
             }
 
             let outputSampleRate = try HALOutputManager.outputSampleRate(
-                deviceID: externalHeadphonesID
+                deviceID: outputDeviceID
             )
             let converter = FixedRateAudioConverter()
             do {
@@ -427,7 +422,7 @@ extension AudioEngineManager {
             let testHALOutputManager = HALOutputManager()
             do {
                 try testHALOutputManager.configure(
-                    deviceID: externalHeadphonesID,
+                    deviceID: outputDeviceID,
                     ringBuffer: convertedRingBuffer,
                     processedSampleRate: outputSampleRate
                 )
@@ -435,7 +430,7 @@ extension AudioEngineManager {
                 try testHALOutputManager.start()
             } catch {
                 throw AudioEngineError.deviceProblem(
-                    "Could not start processed audio on External Headphones: " +
+                    "Could not start processed audio on \(outputDeviceName): " +
                     error.localizedDescription
                 )
             }
