@@ -4,6 +4,14 @@ import Foundation
 import Network
 
 final class WebSocketAudioServer {
+    enum ListenerState {
+        case ready
+        case failed(String)
+        case cancelled
+    }
+
+    var onStateChange: ((ListenerState) -> Void)?
+
     private let port: UInt16
     private let sampleRate: Double
     private let channelCount: Int
@@ -49,12 +57,15 @@ final class WebSocketAudioServer {
             switch state {
             case .ready:
                 self.stateLock.withLock { self._isListening = true }
+                self.onStateChange?(.ready)
                 print("432 Resonance WebSocket server listening at ws://127.0.0.1:\(self.port)/audio")
             case .failed(let error):
                 self.stateLock.withLock { self._isListening = false }
+                self.onStateChange?(.failed(error.localizedDescription))
                 print("432 Resonance WebSocket server error: \(error)")
             case .cancelled:
                 self.stateLock.withLock { self._isListening = false }
+                self.onStateChange?(.cancelled)
                 print("432 Resonance WebSocket server stopped.")
             default:
                 break

@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-private let DEBUG_STREAMING = true
+private let DEBUG_STREAMING = false
 private let DEBUG_AUDIO_TAP = false
 
 enum AudioEngineError: LocalizedError {
@@ -35,6 +35,9 @@ final class AudioEngineManager: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var statusMessage = "Idle"
     @Published private(set) var errorMessage = ""
+    @Published private(set) var activeInputName = ""
+    @Published private(set) var activeOutputName = ""
+    @Published private(set) var streamingActive = false
 
     private var engine: AVAudioEngine?
     private var halOutputManager: HALOutputManager?
@@ -127,6 +130,8 @@ final class AudioEngineManager: ObservableObject {
             statusMessage = "Preparing current system devices..."
             let inputName = deviceManager.inputDevices.first { $0.id == inputID }?.displayName ?? "Device \(inputID)"
             let outputName = outputDevice.displayName
+            activeInputName = inputName
+            activeOutputName = outputName
             print("432 Resonance selected input device: current macOS default -> \(inputName) [\(inputID)]")
             print("432 Resonance selected processed-audio output device: \(outputName) [\(outputID)]")
             print("432 Resonance pitch value: \(settings.pitchShiftCents) cents")
@@ -153,6 +158,9 @@ final class AudioEngineManager: ObservableObject {
     }
 
     func stopEngine() {
+        activeInputName = ""
+        activeOutputName = ""
+        streamingActive = false
         streamingAudioWorker?.stop()
         streamingAudioWorker = nil
         webSocketAudioServer?.stop()
@@ -274,7 +282,7 @@ extension AudioEngineManager {
             )
         }
         resonanceImplementation.setPitchCents(pitchShiftCents)
-        resonanceImplementation.setStreamingEnabled(DEBUG_STREAMING)
+        resonanceImplementation.setStreamingEnabled(true)
 
         print("432 Resonance diagnostic: using ResonanceAudioUnit passthrough graph. requestedPitch=\(pitchShiftCents), bypass=\(bypassed)")
 
@@ -435,66 +443,92 @@ extension AudioEngineManager {
                 )
             }
 
-            if DEBUG_STREAMING {
-                if let (streamingRing, streamingSampleRate, streamingChannelCount) =
-                    resonanceImplementation.streamingRingAccess() {
-                    do {
-                        let server = WebSocketAudioServer(
-                            sampleRate: streamingSampleRate,
-                            channelCount: streamingChannelCount
-                        )
-                        try server.start()
-                        let worker = StreamingAudioWorker(
-                            ringBuffer: streamingRing,
-                            channelCount: streamingChannelCount,
-                            server: server
-                        )
-                        webSocketAudioServer = server
-                        streamingAudioWorker = worker
-                        worker.start()
-                    } catch {
-                        streamingAudioWorker?.stop()
-                        streamingAudioWorker = nil
-                        webSocketAudioServer?.stop()
-                        webSocketAudioServer = nil
-                        print("432 Resonance streaming disabled after startup error: \(error.localizedDescription)")
+            if let (streamingRing, streamingSampleRate, streamingChannelCount) =
+                resonanceImplementation.streamingRingAccess() {
+                do {
+                    let server = WebSocketAudioServer(
+                        sampleRate: streamingSampleRate,
+                        channelCount: streamingChannelCount
+                    )
+                    server.onStateChange = { [weak self, weak server] state in
+                        Task { @MainActor in
+                            guard let self,
+                                  let server,
+                                  self.webSocketAudioServer === server else {
+                                return
+                            }
+
+                            switch state {
+                            case .ready:
+                                self.streamingActive = true
+                            case .failed(let reason):
+                                self.streamingActive = false
+                                self.errorMessage =
+                                    "WebSocket streaming listener failed: \(reason)"
+                            case .cancelled:
+                                self.streamingActive = false
+                            }
+                        }
                     }
-                } else {
-                    print("432 Resonance streaming disabled because its dedicated ring is unavailable.")
+                    webSocketAudioServer = server
+                    streamingActive = false
+                    try server.start()
+                    let worker = StreamingAudioWorker(
+                        ringBuffer: streamingRing,
+                        channelCount: streamingChannelCount,
+                        server: server
+                    )
+                    streamingAudioWorker = worker
+                    worker.start()
+                } catch {
+                    streamingAudioWorker?.stop()
+                    streamingAudioWorker = nil
+                    webSocketAudioServer?.stop()
+                    webSocketAudioServer = nil
+                    streamingActive = false
+                    errorMessage =
+                        "WebSocket streaming could not start: \(error.localizedDescription)"
                 }
+            } else {
+                streamingActive = false
+                errorMessage =
+                    "WebSocket streaming could not start because its audio ring is unavailable."
             }
 
-            Task { @MainActor [weak self, weak resonanceImplementation, weak testHALOutputManager, weak converter] in
-                try? await Task.sleep(for: .seconds(1))
-                guard let self,
-                      let resonanceImplementation,
-                      let testHALOutputManager,
-                      let converter,
-                      self.halOutputManager === testHALOutputManager else {
-                    return
+            if DEBUG_STREAMING {
+                Task { @MainActor [weak self, weak resonanceImplementation, weak testHALOutputManager, weak converter] in
+                    try? await Task.sleep(for: .seconds(1))
+                    guard let self,
+                          let resonanceImplementation,
+                          let testHALOutputManager,
+                          let converter,
+                          self.halOutputManager === testHALOutputManager else {
+                        return
+                    }
+                    self.streamingActive = self.webSocketAudioServer?.isListening ?? false
+                    let snapshot = resonanceImplementation.processedRingSnapshot()
+                    let convertedRing = converter.outputRingBuffer
+                    self.statusMessage =
+                        "sourceRingAvailableFrames=\(snapshot.availableFrames)\n" +
+                        "convertedRingAvailableFrames=\(convertedRing?.availableFrames ?? 0)\n" +
+                        "sourceRingOverflowCount=\(snapshot.overflowCount)\n" +
+                        "convertedRingOverflowCount=\(convertedRing?.overflowCount ?? 0)\n" +
+                        "halUnderflowCount=\(testHALOutputManager.underflowCount)\n" +
+                        "sourceSampleRate=\(converter.sourceSampleRate)\n" +
+                        "outputSampleRate=\(converter.outputSampleRate)\n" +
+                        "sourcePeak=\(converter.sourcePeak)\n" +
+                        "convertedPeak=\(converter.convertedPeak)\n" +
+                        "halOutputPeak=\(testHALOutputManager.outputPeak)\n" +
+                        "converterProducedFrames=\(converter.converterProducedFrames)\n" +
+                        "converterRequestedFrames=\(converter.converterRequestedFrames)\n" +
+                        "websocketListening=\(self.webSocketAudioServer?.isListening ?? false)\n" +
+                        "websocketPort=\(self.webSocketAudioServer?.listeningPort ?? 0)\n" +
+                        "streamingRingAvailableFrames=\(resonanceImplementation.streamingRingSnapshot().availableFrames)\n" +
+                        "streamingRingOverflowCount=\(resonanceImplementation.streamingRingSnapshot().overflowCount)\n" +
+                        "connectedStreamingClients=\(self.webSocketAudioServer?.connectedClientCount ?? 0)\n" +
+                        "streamedFrames=\(self.streamingAudioWorker?.streamedFrames ?? 0)\n" +
+                        "droppedStreamingFrames=\(self.streamingAudioWorker?.droppedFrames ?? 0)"
                 }
-                let snapshot = resonanceImplementation.processedRingSnapshot()
-                let convertedRing = converter.outputRingBuffer
-                self.statusMessage =
-                    "sourceRingAvailableFrames=\(snapshot.availableFrames)\n" +
-                    "convertedRingAvailableFrames=\(convertedRing?.availableFrames ?? 0)\n" +
-                    "sourceRingOverflowCount=\(snapshot.overflowCount)\n" +
-                    "convertedRingOverflowCount=\(convertedRing?.overflowCount ?? 0)\n" +
-                    "halUnderflowCount=\(testHALOutputManager.underflowCount)\n" +
-                    "sourceSampleRate=\(converter.sourceSampleRate)\n" +
-                    "outputSampleRate=\(converter.outputSampleRate)\n" +
-                    "sourcePeak=\(converter.sourcePeak)\n" +
-                    "convertedPeak=\(converter.convertedPeak)\n" +
-                    "halOutputPeak=\(testHALOutputManager.outputPeak)\n" +
-                    "converterProducedFrames=\(converter.converterProducedFrames)\n" +
-                    "converterRequestedFrames=\(converter.converterRequestedFrames)\n" +
-                    "websocketListening=\(self.webSocketAudioServer?.isListening ?? false)\n" +
-                    "websocketPort=\(self.webSocketAudioServer?.listeningPort ?? 0)\n" +
-                    "streamingRingAvailableFrames=\(resonanceImplementation.streamingRingSnapshot().availableFrames)\n" +
-                    "streamingRingOverflowCount=\(resonanceImplementation.streamingRingSnapshot().overflowCount)\n" +
-                    "connectedStreamingClients=\(self.webSocketAudioServer?.connectedClientCount ?? 0)\n" +
-                    "streamedFrames=\(self.streamingAudioWorker?.streamedFrames ?? 0)\n" +
-                    "droppedStreamingFrames=\(self.streamingAudioWorker?.droppedFrames ?? 0)"
             }
         } catch let error as AudioEngineError {
             throw error

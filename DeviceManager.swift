@@ -31,7 +31,7 @@ final class DeviceManager: ObservableObject {
         let devices = Self.enumerateAudioDevices()
         inputDevices = devices.filter(\.hasInput).sorted { $0.displayName < $1.displayName }
         outputDevices = devices.filter(\.hasOutput).sorted { $0.displayName < $1.displayName }
-        hasBlackHoleInput = inputDevices.contains { $0.displayName.localizedCaseInsensitiveContains("BlackHole") }
+        hasBlackHoleInput = blackHoleInputDevice != nil
         print("432 Resonance CoreAudio diagnostic: after refreshDevices. inputs=\(inputDevices.count), outputs=\(outputDevices.count), hasBlackHole=\(hasBlackHoleInput)")
     }
 
@@ -69,6 +69,40 @@ final class DeviceManager: ObservableObject {
         }
 
         return nil
+    }
+
+    var blackHoleInputDevice: AudioDevice? {
+        inputDevices.first {
+            $0.displayName.compare(
+                "BlackHole 2ch",
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) == .orderedSame
+        } ?? inputDevices.first {
+            $0.displayName.localizedCaseInsensitiveContains("BlackHole")
+        }
+    }
+
+    var blackHoleInputName: String? {
+        blackHoleInputDevice?.displayName
+    }
+
+    func isOutputDeviceAvailable(_ deviceID: AudioDeviceID?) -> Bool {
+        guard let deviceID else { return false }
+        return outputDevices.contains { $0.id == deviceID }
+    }
+
+    func resolvedOutputDeviceName(selectedDeviceID: AudioDeviceID?) -> String? {
+        guard let deviceID = resolvedOutputDeviceID(
+            selectedDeviceID: selectedDeviceID
+        ) else {
+            return nil
+        }
+        return outputDevices.first { $0.id == deviceID }?.displayName
+    }
+
+    func currentDefaultInputDeviceName() -> String? {
+        guard let deviceID = defaultInputDeviceID() else { return nil }
+        return inputDevices.first { $0.id == deviceID }?.displayName
     }
 }
 

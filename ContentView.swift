@@ -83,11 +83,19 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle()
-                    .fill(audioEngineManager.isRunning ? Color.green : Color.gray)
+                    .fill(statusColor)
                     .frame(width: 10, height: 10)
-                Text(audioEngineManager.statusMessage)
+                Text(readinessHeading)
                     .font(.headline)
             }
+
+            Text("Input: \(displayedInputName)")
+            Text("Output: \(displayedOutputName)")
+            Text("Streaming: \(streamingStatus)")
+
+            Text(audioEngineManager.statusMessage)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
 
             if !audioEngineManager.errorMessage.isEmpty {
                 Text(audioEngineManager.errorMessage)
@@ -103,6 +111,49 @@ struct ContentView: View {
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var canResolveOutput: Bool {
+        deviceManager.resolvedOutputDeviceID(
+            selectedDeviceID: settings.selectedOutputDeviceID
+        ) != nil
+    }
+
+    private var isReady: Bool {
+        deviceManager.hasBlackHoleInput &&
+            canResolveOutput &&
+            audioEngineManager.errorMessage.isEmpty
+    }
+
+    private var readinessHeading: String {
+        if audioEngineManager.isRunning { return "Processing" }
+        return isReady ? "Ready" : "Not Ready"
+    }
+
+    private var statusColor: Color {
+        if audioEngineManager.isRunning { return .green }
+        return isReady ? .blue : .gray
+    }
+
+    private var displayedInputName: String {
+        if !audioEngineManager.activeInputName.isEmpty {
+            return audioEngineManager.activeInputName
+        }
+        return deviceManager.currentDefaultInputDeviceName() ?? "Unavailable"
+    }
+
+    private var displayedOutputName: String {
+        if !audioEngineManager.activeOutputName.isEmpty {
+            return audioEngineManager.activeOutputName
+        }
+        return deviceManager.resolvedOutputDeviceName(
+            selectedDeviceID: settings.selectedOutputDeviceID
+        ) ?? "Unavailable"
+    }
+
+    private var streamingStatus: String {
+        if !isReady && !audioEngineManager.isRunning { return "Unavailable" }
+        return audioEngineManager.streamingActive ? "Active" : "Inactive"
     }
 
     private var inputSelection: Binding<AudioDeviceID?> {
