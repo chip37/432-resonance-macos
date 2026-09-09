@@ -45,7 +45,9 @@ final class AudioEngineManager: ObservableObject {
     private var dspProcessor: DSPProcessor?
     private var webSocketAudioServer: WebSocketAudioServer?
     private var streamingAudioWorker: StreamingAudioWorker?
+    private var activeOutputDeviceID: AudioDeviceID?
     private var isStarting = false
+    private var isRecoveringOutputDevice = false
 
     func requestMicrophonePermission() async -> Bool {
         let authorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -121,6 +123,7 @@ final class AudioEngineManager: ObservableObject {
             return
         }
         settings.selectedOutputDeviceID = outputID
+        activeOutputDeviceID = outputID
 
         if !deviceManager.hasBlackHoleInput {
             errorMessage = AudioEngineError.missingBlackHole.localizedDescription
@@ -161,6 +164,7 @@ final class AudioEngineManager: ObservableObject {
         activeInputName = ""
         activeOutputName = ""
         streamingActive = false
+        activeOutputDeviceID = nil
         streamingAudioWorker?.stop()
         streamingAudioWorker = nil
         webSocketAudioServer?.stop()
@@ -217,6 +221,23 @@ final class AudioEngineManager: ObservableObject {
         if isRunning && !bypassed {
             statusMessage = "Processing at \(cents) cents"
         }
+    }
+
+    func handleDeviceListChange(
+        settings: SettingsModel,
+        deviceManager: DeviceManager
+    ) async {
+        guard isRunning, !isRecoveringOutputDevice else { return }
+        guard let activeOutputDeviceID,
+              !deviceManager.isOutputDeviceAvailable(activeOutputDeviceID) else {
+            return
+        }
+
+        isRecoveringOutputDevice = true
+        defer { isRecoveringOutputDevice = false }
+
+        stopEngine()
+        await start(settings: settings, deviceManager: deviceManager)
     }
 
     private func deviceDescription(_ deviceID: AudioDeviceID?, in devices: [AudioDevice]) -> String {
@@ -293,7 +314,7 @@ extension AudioEngineManager {
         print("432 Resonance diagnostic: before reading main mixer node.")
         let mainMixer = newEngine.mainMixerNode
         print("432 Resonance diagnostic: after reading main mixer node.")
-        mainMixer.outputVolume = 1.0
+        mainMixer.outputVolume = 0.00001
         print("432 Resonance diagnostic: mainMixerNode.outputVolume=\(mainMixer.outputVolume)")
 
         print("432 Resonance diagnostic: before reading output node.")

@@ -68,6 +68,14 @@ struct ContentView: View {
             deviceManager.refreshDevices()
             selectDefaultsIfNeeded()
         }
+        .onChange(of: deviceManager.deviceListRevision) { _, _ in
+            Task {
+                await audioEngineManager.handleDeviceListChange(
+                    settings: settings,
+                    deviceManager: deviceManager
+                )
+            }
+        }
     }
 
     private var header: some View {

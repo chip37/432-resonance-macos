@@ -25,6 +25,28 @@ final class DeviceManager: ObservableObject {
     @Published private(set) var inputDevices: [AudioDevice] = []
     @Published private(set) var outputDevices: [AudioDevice] = []
     @Published private(set) var hasBlackHoleInput = false
+    @Published private(set) var deviceListRevision = 0
+
+    private var deviceListListener: AudioObjectPropertyListenerBlock?
+
+    init() {
+        installDeviceListListener()
+    }
+
+    deinit {
+        guard let deviceListListener else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            .main,
+            deviceListListener
+        )
+    }
 
     func refreshDevices() {
         print("432 Resonance CoreAudio diagnostic: before refreshDevices.")
@@ -103,6 +125,36 @@ final class DeviceManager: ObservableObject {
     func currentDefaultInputDeviceName() -> String? {
         guard let deviceID = defaultInputDeviceID() else { return nil }
         return inputDevices.first { $0.id == deviceID }?.displayName
+    }
+
+    private static var deviceListPropertyAddress: AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+    }
+
+    private func installDeviceListListener() {
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.refreshDevices()
+                self.deviceListRevision &+= 1
+            }
+        }
+        var address = Self.deviceListPropertyAddress
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            .main,
+            listener
+        )
+        if status == noErr {
+            deviceListListener = listener
+        } else {
+            print("432 Resonance could not observe audio-device changes. OSStatus=\(status)")
+        }
     }
 }
 
