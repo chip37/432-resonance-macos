@@ -9,6 +9,7 @@ enum AudioEngineError: LocalizedError {
     case missingInputDevice
     case missingOutputDevice
     case missingBlackHole
+    case blackHoleMustBeDefaultInput
     case startupFailure(String)
     case deviceProblem(String)
 
@@ -22,6 +23,8 @@ enum AudioEngineError: LocalizedError {
             return "No output device is available. Connect speakers, headphones, or another output device."
         case .missingBlackHole:
             return "BlackHole was not found. The app can still use another input, but BlackHole 2ch is expected for system-audio passthrough."
+        case .blackHoleMustBeDefaultInput:
+            return "BlackHole 2ch must be selected as your Mac's Sound Input.\nOpen System Settings → Sound → Input → BlackHole 2ch."
         case .startupFailure(let reason):
             return "Audio processing could not start: \(reason)"
         case .deviceProblem(let reason):
@@ -113,6 +116,16 @@ final class AudioEngineManager: ObservableObject {
 
         guard let inputID = deviceManager.defaultInputDeviceID() else {
             present(.missingInputDevice)
+            return
+        }
+
+        guard let blackHoleInputDevice = deviceManager.blackHoleInputDevice else {
+            present(.missingBlackHole)
+            return
+        }
+
+        guard inputID == blackHoleInputDevice.id else {
+            present(.blackHoleMustBeDefaultInput)
             return
         }
 
