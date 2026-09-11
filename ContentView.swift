@@ -5,68 +5,17 @@ struct ContentView: View {
     @EnvironmentObject private var deviceManager: DeviceManager
     @EnvironmentObject private var audioEngineManager: AudioEngineManager
 
-    @State private var pitchText = "-31.77"
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 20) {
             header
-
-            Form {
-                Picker("Input Device", selection: inputSelection) {
-                    Text("System Default").tag(AudioDeviceID?.none)
-                    ForEach(deviceManager.inputDevices) { device in
-                        Text(device.displayName).tag(AudioDeviceID?.some(device.id))
-                    }
-                }
-
-                Picker("Output Device", selection: outputSelection) {
-                    Text("System Default").tag(AudioDeviceID?.none)
-                    ForEach(deviceManager.outputDevices) { device in
-                        Text(device.displayName).tag(AudioDeviceID?.some(device.id))
-                    }
-                }
-
-                TextField("Pitch Shift (cents)", text: $pitchText)
-                    .onSubmit(applyPitchText)
-
-                Toggle("Bypass", isOn: $settings.isBypassed)
-                    .onChange(of: settings.isBypassed) { _, newValue in
-                        audioEngineManager.updateBypass(newValue, pitchShiftCents: settings.pitchShiftCents)
-                    }
-            }
-            .formStyle(.grouped)
-
-            HStack(spacing: 12) {
-                Button("Start Processing") {
-                    applyPitchText()
-                    Task {
-                        await audioEngineManager.start(settings: settings, deviceManager: deviceManager)
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(audioEngineManager.isRunning)
-
-                Button("Stop Processing") {
-                    audioEngineManager.stop()
-                }
-                .disabled(!audioEngineManager.isRunning)
-
-                Button("Refresh Devices") {
-                    deviceManager.refreshDevices()
-                    selectDefaultsIfNeeded()
-                }
-            }
-
             statusArea
 
-            Text("Note: device selection is implemented by asking CoreAudio to switch the macOS default input/output before starting. Dedicated per-engine output routing is future CoreAudio work.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            primaryButton
         }
         .padding(24)
         .onAppear {
             deviceManager.refreshDevices()
-            selectDefaultsIfNeeded()
+            selectOutputDefaultIfNeeded()
         }
         .onChange(of: deviceManager.deviceListRevision) { _, _ in
             Task {
@@ -82,7 +31,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("432 Resonance")
                 .font(.title.bold())
-            Text("Live input -> pitch shift -> output")
+            Text("System audio, retuned to 432 Hz")
                 .foregroundStyle(.secondary)
         }
     }
@@ -97,21 +46,33 @@ struct ContentView: View {
                     .font(.headline)
             }
 
-            Text("Input: \(displayedInputName)")
-            Text("Output: \(displayedOutputName)")
-            Text("Streaming: \(streamingStatus)")
+            LabeledContent("Input") {
+                Text(inputStatus)
+            }
 
-            Text(audioEngineManager.statusMessage)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            LabeledContent("Output") {
+                if audioEngineManager.isRunning {
+                    Text(displayedOutputName)
+                } else {
+                    Picker("Output", selection: outputSelection) {
+                        Text("Automatic").tag(AudioDeviceID?.none)
+                        ForEach(deviceManager.outputDevices) { device in
+                            Text(device.displayName).tag(AudioDeviceID?.some(device.id))
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 280)
+                }
+            }
 
-            if !audioEngineManager.errorMessage.isEmpty {
-                Text(audioEngineManager.errorMessage)
+            LabeledContent("Remote Streaming") {
+                Text(streamingStatus)
+            }
+
+            if let visibleError {
+                Divider()
+                Text(visibleError)
                     .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            } else if !deviceManager.hasBlackHoleInput {
-                Text("BlackHole 2ch was not detected. Select another input or install BlackHole for system-audio routing.")
-                    .foregroundStyle(.orange)
                     .textSelection(.enabled)
             }
         }
@@ -128,13 +89,21 @@ struct ContentView: View {
     }
 
     private var isReady: Bool {
-        deviceManager.hasBlackHoleInput &&
+        blackHoleIsDefaultInput &&
             canResolveOutput &&
             audioEngineManager.errorMessage.isEmpty
     }
 
+    private var blackHoleIsDefaultInput: Bool {
+        guard let blackHoleID = deviceManager.blackHoleInputDevice?.id,
+              let defaultInputID = deviceManager.defaultInputDeviceID() else {
+            return false
+        }
+        return blackHoleID == defaultInputID
+    }
+
     private var readinessHeading: String {
-        if audioEngineManager.isRunning { return "Processing" }
+        if audioEngineManager.isRunning { return "Processing at 432 Hz" }
         return isReady ? "Ready" : "Not Ready"
     }
 
@@ -143,11 +112,13 @@ struct ContentView: View {
         return isReady ? .blue : .gray
     }
 
-    private var displayedInputName: String {
-        if !audioEngineManager.activeInputName.isEmpty {
-            return audioEngineManager.activeInputName
+    private var inputStatus: String {
+        if blackHoleIsDefaultInput {
+            return deviceManager.blackHoleInputName ?? "BlackHole 2ch"
         }
-        return deviceManager.currentDefaultInputDeviceName() ?? "Unavailable"
+        return deviceManager.hasBlackHoleInput
+            ? "BlackHole 2ch not selected"
+            : "BlackHole 2ch not installed"
     }
 
     private var displayedOutputName: String {
@@ -164,11 +135,20 @@ struct ContentView: View {
         return audioEngineManager.streamingActive ? "Active" : "Inactive"
     }
 
-    private var inputSelection: Binding<AudioDeviceID?> {
-        Binding(
-            get: { settings.selectedInputDeviceID },
-            set: { settings.selectedInputDeviceID = $0 }
-        )
+    private var visibleError: String? {
+        if !audioEngineManager.errorMessage.isEmpty {
+            return audioEngineManager.errorMessage
+        }
+        if !deviceManager.hasBlackHoleInput {
+            return "BlackHole 2ch was not found. Install BlackHole 2ch before starting."
+        }
+        if !blackHoleIsDefaultInput {
+            return "BlackHole 2ch must be selected as your Mac's Sound Input.\nOpen System Settings → Sound → Input → BlackHole 2ch."
+        }
+        if !canResolveOutput {
+            return "No audio output is available. Connect speakers or headphones."
+        }
+        return nil
     }
 
     private var outputSelection: Binding<AudioDeviceID?> {
@@ -178,19 +158,33 @@ struct ContentView: View {
         )
     }
 
-    private func applyPitchText() {
-        guard let value = Double(pitchText.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            audioEngineManager.updatePitchShift(settings.pitchShiftCents, bypassed: settings.isBypassed)
-            return
+    @ViewBuilder
+    private var primaryButton: some View {
+        if audioEngineManager.isRunning {
+            Button("Stop Processing") {
+                audioEngineManager.stop()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .frame(maxWidth: .infinity)
+        } else {
+            Button("Start Processing") {
+                Task {
+                    await audioEngineManager.start(
+                        settings: settings,
+                        deviceManager: deviceManager
+                    )
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
+            .disabled(!isReady)
+            .frame(maxWidth: .infinity)
         }
-        settings.pitchShiftCents = value
-        audioEngineManager.updatePitchShift(value, bypassed: settings.isBypassed)
     }
 
-    private func selectDefaultsIfNeeded() {
-        if settings.selectedInputDeviceID == nil {
-            settings.selectedInputDeviceID = deviceManager.defaultInputDeviceID()
-        }
+    private func selectOutputDefaultIfNeeded() {
         if settings.selectedOutputDeviceID == nil {
             settings.selectedOutputDeviceID = deviceManager.defaultOutputDeviceID()
         }
